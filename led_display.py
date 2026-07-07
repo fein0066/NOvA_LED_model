@@ -1,22 +1,9 @@
-import apa102 #<-- this is the driver for the LEDs
-import time
-import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from scipy.ndimage import zoom
+from enum import Enum
 
-# Input simulation file
-f=h5py.File("postprocessed_miniprod6_1_eventonly_small.h5")
-  
-# Information extracted from input file
-shape=f['pixelmap_shape']
-coords=f['pixelmap_coordinates']
-values=f['pixelmap_values']
-evt_index=f['pixelmap_compressed_index']
-evt_class=f['event_class']
-
-# This block copied from Sean's "rgbcalibrate.py"
 # Initialize indexing scheme for the LED model
 vert_multiples  = [    3,2,    7,6,    11,10,      15,14,      19,18,      23,22,      27,26,      31,30,      35,34,      39,38,      43,42,      47,46,      51,50,      55,54,      59,58,     63,62]
 horiz_multiples = [0,1,    4,5,    8,9,      12,13,      16,17,      20,21,      24,25,      28,29,      32,33,      36,37,      40,41,      44,45,      48,49,      52,53,      56,57,      60,61     ]
@@ -47,28 +34,20 @@ for base in range(960, -1, -64):
     beam_index_list.extend(chunks[3])
     beam_index_list.extend(chunks[0])
 
-# INCOMPLETE
 # Create planar indexing chunks for vertically sequential lighting (cosmic events)
 cosmic_index_list = []
 for base in range(960, -1, -64):
     chunk_0 = list(range(base+47, base+31, -1))
     chunk_1 = list(range(base+63, base+47, -1))
+    # The following two lines were formerly reversed in position. This is now believed to be correct, but this comment is left here as a REMINDER IF NOT WORKING
     cosmic_index_list.extend(chunk_0)
     cosmic_index_list.extend(chunk_1)
 
-# Set the number of LED boards (individual modules, 2 horiz rows 2 vert rows)
-num_boards = 32
-# Multiply boards by LEDs per board to produce total number of LEDs
-num_led = 32*num_boards
-
-# Initialize LED hardware
-strip = apa102.APA102(num_led=num_led, global_brightness = 10, spi_bus = 0, bus_speed_hz = int(2.5*10**6)) # Bus speed affects the time between the lighting of sequential LEDs; bus speed increases, time decreases
 
 # Set the static color to be used if full color events are disabled
 static_color = 0x006600
 
 # Initialize sizes of various types of arrays used throughout
-SIM_SHAPE = (100, 80) # Simulation is unpacked into arrays of this shape
 ARRAY_SHAPE = (160, 80) # Simulation is processed into arrays of this shape (same proportions as LED model)
 LED_SHAPE = (32, 16) # Physical LED model shape
 
@@ -76,14 +55,24 @@ LED_SHAPE = (32, 16) # Physical LED model shape
 BLOCK_Y = ARRAY_SHAPE[0] // LED_SHAPE[0]
 BLOCK_X = ARRAY_SHAPE[1] // LED_SHAPE[1]
 
-# Dictionary to convert "event_type" integers from h5 file to strings
-event_type_dict = {0:"PLACEHOLDER", 1:"PLACEHOLDER", 2:"PLACEHOLDER", 3:"PLACEHOLDER", 4:"PLACEHOLDER", 5:"PLACEHOLDER", 6:"PLACEHOLDER", 7:"PLACEHOLDER", 8:"PLACEHOLDER", 9:"cosmic"}
-
 # Set the normalization for the color scale 
 # WARNING: vmax is manually set to be the max energy acoss all events in the display set
 vmax = 946.5 # max energy displayed on color scale
-vmin = 0
+vmin = 10 # small nonzero value to avoid errors resulting from zero
 norm = mcolors.LogNorm(vmin=vmin, vmax=vmax, clip=True)
+
+# Create enum for classifying event types
+class EventType(Enum):
+    NUMU_QE = 0
+    NUMU_RES = 1
+    NUMU_DIS = 2
+    NUMU_OTHER = 3
+    NUE_QE = 4
+    NUE_RES = 5
+    NUE_DIS = 6
+    NUE_OTHER = 7
+    NC = 8
+    COSMIC = 9
 
 
 
@@ -112,14 +101,14 @@ class Event:
                 resizes self.horiz and self.vert to stretched size proportional to scale of LED model or to random factors smaller subject to constraints of arguments
             Arguments:
                 enable_random : boolean, tells whether randomized stretch factor is enabled
-                min_random : float, 0 <= min_random < 1, min possible randomized stretch factor if enabled
-                max_random : float, min_random <= max_random < 1, max possible randomized stretch factor if enabled
+                min_random : float, 0 < min_random <= 1, min possible randomized stretch factor if enabled
+                max_random : float, min_random <= max_random <= 1, max possible randomized stretch factor if enabled
         .pad_event(x_offset_horiz=0, x_offset_vert=0, y_offset=0)
             Description:
                 resizes self.horiz and self.vert to 2D arrays of size proportional to scale of LED model with pixels surrounding initially populated region set to 0, subject positional offsets in arguments
             Arguments:
                 x_offset_horiz : integer, number of rows of array to offset active region of self.horiz[1] before filling with zeros
-                x_offset_vert : integer, number of rows of array to offset active region of self.vert[1] before filling with zeros
+                x_offset_vert : integer, number of rows of array to offset active region of self.vert[1] before fillingt with zeros
                 y_offset : integer, number of rows of array to offset active region of self.horiz[0] and self.vert[0] before filling with zeros
         .compresss_to_led_grid(mode="sum")
             Description:
@@ -161,7 +150,7 @@ class Event:
             threshold = 0
         # Raise error if cutoff threshold is not valid
         elif cutoff == True: 
-            if threshold not in range(0.0, 1.0):
+            if not (0.0 <= threshold <= 1.0):
                 raise ValueError("'threshold' must be float between 0 and 1")
         # Raise error if choice to cutoff is unclear
         else:
@@ -174,15 +163,15 @@ class Event:
         y_coords, x_coords = np.where(mask)
         # Crop event object to smaller size, rectangle surrounding active pixels
         self.horiz = self.horiz[y_coords.min():y_coords.max()+1, x_coords.min():x_coords.max()+1]
-        self.vert = self.horiz[y_coords.min():y_coords.max()+1, x_coords.min():x_coords.max()+1]
+        self.vert = self.vert[y_coords.min():y_coords.max()+1, x_coords.min():x_coords.max()+1]
 
     # Resize event to size proportional to the physical LED model
     def stretch_event(self, enable_random=False, min_random=0.5, max_random=1):
         # Set random scale factors for each dimension within specified range if desired
         if enable_random == True:
-            if min_random not in range(0.0, 1.0):
+            if not (0.0 < min_random <= 1.0):
                 raise ValueError("'min_random' must be float between 0 and 1")
-            if max_random not in range(min_random, 1.0):
+            if not (min_random <= max_random <= 1.0):
                 raise ValueError("'max_random' must be float greater than min_random between 0 and 1")
             scale_y = np.random.uniform(min_random, max_random)
             scale_x_horiz = np.random.uniform(min_random, max_random)
@@ -202,18 +191,50 @@ class Event:
         self.horiz = horiz_zoomed*((self.horiz).sum()/horiz_zoomed.sum())
         self.vert = vert_zoomed*((self.vert).sum()/vert_zoomed.sum())
 
-    # Add zeros to pad events to match the size of model-scale array
-    # Offset must be given; high-level oeprations can assign specified costants or random constants
     def pad_event(self, x_offset_horiz=0, x_offset_vert=0, y_offset=0):
-        # Raise error if offsets are not valid indices
-        if (x_offset_horiz % 1 != 0) or (x_offset_vert % 1 != 0) or (y_offset % 1 != 0):
-            raise ValueError("all arguments 'x_offset_horiz', 'x_offset_vert', 'y_offset' must be integers")
-        # Initialize full size arrays
-        horiz_output = np.zeros(ARRAY_SHAPE)
-        vert_output = np.zeros(ARRAY_SHAPE)
-        # Place event within the full array at the specified offset location
-        horiz_output[y_offset:y_offset+(self.horiz).shape[0], x_offset_horiz:x_offset_horiz+(self.horiz).shape[1]] = self.horiz
-        vert_output[y_offset:y_offset+(self.vert).shape[0], x_offset_vert:x_offset_vert+(self.vert).shape[1]] = self.vert
+        # Verify integer offsets
+        for offset in (x_offset_horiz, x_offset_vert, y_offset):
+            if not isinstance(offset, (int, np.integer)):
+                raise ValueError("'x_offset_horiz', 'x_offset_vert', and 'y_offset' must all be integers")
+        # Define helper function for overlap test
+        def overlaps(a0, a1, b0, b1):
+            return (a0 < b1) and (a1 > b0)
+        # Extract event dimensions
+        h, w = self.horiz.shape
+        # Detector-volume overlap test
+        inside_x_horiz = overlaps(x_offset_horiz, x_offset_horiz + w, 0, ARRAY_SHAPE[1])
+        inside_x_vert = overlaps(x_offset_vert, x_offset_vert + w, 0, ARRAY_SHAPE[1])
+        inside_y = overlaps(y_offset, y_offset + h, 0, ARRAY_SHAPE[0])
+        # If the event volume does not overlap the detector in ALL THREE dimensions, suppress both views.
+        if not (inside_x_horiz and inside_x_vert and inside_y):
+            self.horiz = np.zeros(ARRAY_SHAPE)
+            self.vert = np.zeros(ARRAY_SHAPE)
+            return
+        # Define helper function for clipped placement
+        def clip_into_detector(src, x_offset, y_offset):
+            # Extract event dimensions
+            H, W = ARRAY_SHAPE
+            h, w = src.shape
+            # Initialize output array
+            output = np.zeros((H, W))
+            # Destination coordinates within detector
+            output_x0 = max(0, x_offset)
+            output_y0 = max(0, y_offset)
+            output_x1 = min(W, x_offset + w)
+            output_y1 = min(H, y_offset + h)
+            # No overlap for this projection
+            if output_x1 <= output_x0 or output_y1 <= output_y0:
+                return output
+            # Corresponding source coordinates
+            src_x0 = max(0, -x_offset)
+            src_y0 = max(0, -y_offset)
+            src_x1 = src_x0 + (output_x1 - output_x0)
+            src_y1 = src_y0 + (output_y1 - output_y0)
+            output[output_y0:output_y1, output_x0:output_x1] = src[src_y0:src_y1, src_x0:src_x1]
+            return output
+        # Place both projections with clipping
+        self.horiz = clip_into_detector(self.horiz, x_offset_horiz, y_offset)
+        self.vert = clip_into_detector(self.vert, x_offset_vert, y_offset)
 
     # Compress an event with the same proportions as the model to the size of the model
     # WARNING: Behavior for events not scaled to the same proportions as the model is untested
@@ -235,7 +256,7 @@ class Event:
             raise ValueError("mode must be 'sum' or 'max' or 'mean'")
 
     # Convert event information from energy to color hex codes
-    def values_to_hex(self, cmap_name="rainbow", threshold=0.01, brightness=96.0/255.0):
+    def values_to_hex(self, cmap_name="jet", threshold=0.01, brightness=96.0/255.0):
         # Raise error if provided threshold is invalid
         if threshold < 0 or threshold > 1:
             raise ValueError("'threshold' must be float between 0 and 1")
@@ -291,16 +312,15 @@ class Event:
         led_array = led_array[led_array[:,0].argsort()]
         self.led_array = led_array
 
-    # INCOMPLETE - add color_enabled functionality and vertical LED progression for cosmics
     # Outputs event to LED model according to provided mode
-    def display(self, strip, mode="progressive", color_enabled=True):
+    def display(self, strip, mode="progressive", color_enabled=True, num_led=1024):
         # Display event in progressively filled layers
         if mode == "progressive":
             # Progressively fill horizontal layers for cosmics
-            if self.event_type =="cosmic":
+            if self.event_type == EventType.COSMIC:
                 # Assign all LED outputs
-                for i in range(len(self.led_array)):
-                    if self.led_array[cosmic_index_list[i]] != 0:
+                for i in range(len(cosmic_index_list)):
+                    if self.led_array[cosmic_index_list[i]][1] != 0:
                         color = int(self.led_array[cosmic_index_list[i]][1])
                         if color_enabled == True:
                             strip.set_pixel_rgb(cosmic_index_list[i], color)
@@ -308,6 +328,21 @@ class Event:
                             strip.set_pixel_rgb(cosmic_index_list[i], static_color)
                     # Display LED outputs in layers
                     if i % 32 == 0:
+                        # Light the adjacent LEDs on the horizontal plane
+                        if (cosmic_index_list[i]+1) % 16 == 0:
+                            left_index = cosmic_index_list[i] - 47
+                            right_index = cosmic_index_list[i] - 63
+                        else:
+                            left_index = cosmic_index_list[i] + 17
+                            right_index = cosmic_index_list[i] - 31
+                        if left_index < 1024:
+                            for j in range(0, 16):
+                                color_left = int(self.led_array[left_index+j][1])
+                                strip.set_pixel_rgb(left_index+j, color_left)
+                        if right_index >= 0:
+                            for j in range(0, 16):
+                                color_right = int(self.led_array[right_index+j][1])
+                                strip.set_pixel_rgb(right_index+j, color_right)
                         strip.show()
             # Progressively fill vertical layers for all events except cosmics
             else:
@@ -336,9 +371,9 @@ class Event:
         # Display event in planes passing through the model
         elif mode == "planar":
             # Vertically sweep through planes for cosmics
-            if self.event_type == "cosmic":
+            if self.event_type == EventType.COSMIC:
                 # Assign all LED outputs
-                for i in range(len(self.led_array)):
+                for i in range(len(cosmic_index_list)):
                     if self.led_array[cosmic_index_list[i]][1] != 0:
                         color = int(self.led_array[cosmic_index_list[i]][1])
                         if color_enabled == True:
@@ -373,11 +408,11 @@ class Event:
         elif mode == "fade":
             # INCOMPLETE
             # Vertically sweep and fade for cosmics
-            if self.event_type == "cosmic":
+            if self.event_type == EventType.COSMIC:
                 # Initialize framebuffer
                 current_colors = np.zeros(num_led)
                 # Assign all initial LED outputs
-                for i in range(len(self.led_array)):
+                for i in range(len(cosmic_index_list)):
                     if self.led_array[cosmic_index_list[i]][1] != 0:
                         color = int(self.led_array[cosmic_index_list[i]][1])
                         if color_enabled == True:
@@ -405,7 +440,7 @@ class Event:
                                 new_rgb = (r << 16) | (g << 8) | b
                                 current_colors[cosmic_index_list[update_index]] = new_rgb
                                 strip.set_pixel_rgb(cosmic_index_list[update_index], new_rgb)
-                            strip.show()
+                        strip.show()
                 strip.show()
                 # Turn off residual pixels after reaching end 
                 for index in beam_index_list:
@@ -444,7 +479,7 @@ class Event:
                                 new_rgb = (r << 16) | (g << 8) | b
                                 current_colors[beam_index_list[update_index]] = new_rgb
                                 strip.set_pixel_rgb(beam_index_list[update_index], new_rgb)
-                            strip.show()
+                        strip.show()
                 strip.show()
                 # Turn off residual pixels after reaching end 
                 for index in beam_index_list:
@@ -453,32 +488,3 @@ class Event:
         # Raise error if an unrecognized display mode is requested
         else:
             raise ValueError("mode must be 'progressive' (default) or 'full' of 'planar' or 'fade'")
-        
-
-
-# CHANGE THIS LINE TO THE LIST OF ALL INDEX NUMBERS OF DESIRED DISPLAY EVENTS WITHIN THE H5 INPUT FILE
-event_index_list = [4,5,16,18,26,30,34,36,38,48,49,52,53,58,61,66,72,78,83,85,88,97,99,103,109,110]
-# 
-for idx in event_index_list:
-    # Initialize "full" arrays (containing zeros wehre no hits exist)
-    horiz_full = np.zeros(SIM_SHAPE)
-    vert_full = np.zeros(SIM_SHAPE)
-    # Get coords, values, and event type
-    start, stop = evt_index[idx]
-    event_type = evt_class[idx]
-    event_values = values[start:stop]
-    event_coords = coords[start:stop]
-    # populate full arrays
-    for (y,x), (value_vert, value_horiz) in zip(event_coords, event_values):
-        if value_horiz != 0:
-            horiz_full[y,x] = value_horiz
-        if value_vert != 0:
-            vert_full[y,x] = value_vert
-    # Create "Event" object each loop, modify it to displayable format, display it
-    event = Event(horiz_full, vert_full, event_type[idx])
-    event.crop_event(cutoff=True, threshold=0.01)
-    event.pad_event(x_offset_horiz=0, x_offset_vert=0, y_offset_vert=0)
-    event.compress_to_led_grid(mode="sum")
-    event.values_to_hex(cmap_name="rainbow", threshold=0.01)
-    event.led_output()
-    event.display(strip, mode="progressive", color_enabled=True)
